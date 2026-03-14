@@ -200,6 +200,9 @@ pub mod vk {
     pub const F22: InputKey = InputKey::new(0x85);
     pub const F23: InputKey = InputKey::new(0x86);
     pub const F24: InputKey = InputKey::new(0x87);
+
+    /// The '/' key (used for Ctrl+/ comment toggle).
+    pub const SLASH: InputKey = InputKey::new('/' as u32);
 }
 
 /// Keyboard modifiers.
@@ -343,6 +346,16 @@ impl<'input> Iterator for Stream<'_, '_, 'input> {
                         let key = ch as u32 | 0x40;
                         return Some(Input::Keyboard(kbmod::CTRL | InputKey::new(key)));
                     }
+                    '\x1c'..='\x1e' => {
+                        // Ctrl+\, Ctrl+], Ctrl+^
+                        let key = ch as u32 | 0x40;
+                        return Some(Input::Keyboard(kbmod::CTRL | InputKey::new(key)));
+                    }
+                    '\x1f' => {
+                        // Sent by terminals for Ctrl+/ (slash) and Ctrl+_
+                        // We treat this as Ctrl+/ for the comment toggle shortcut.
+                        return Some(Input::Keyboard(kbmod::CTRL | vk::SLASH));
+                    }
                     '\x7f' => return Some(Input::Keyboard(vk::BACK)),
                     _ => {}
                 },
@@ -480,6 +493,21 @@ impl<'input> Iterator for Stream<'_, '_, 'input> {
                             let width = (csi.params[2] as CoordType).clamp(1, 32767);
                             let height = (csi.params[1] as CoordType).clamp(1, 32767);
                             return Some(Input::Resize(Size { width, height }));
+                        }
+                        'u' if csi.private_byte == '\0' => {
+                            // Kitty keyboard protocol: ESC[{codepoint};{modifier}u
+                            let codepoint = csi.params[0] as u32;
+                            let modifiers = Self::parse_modifiers(csi);
+                            // Only handle printable ASCII for now
+                            if (0x20..=0x7E).contains(&codepoint) {
+                                // Normalize lowercase to uppercase to match vk:: constants
+                                let key = if codepoint >= 'a' as u32 && codepoint <= 'z' as u32 {
+                                    codepoint & !0x20
+                                } else {
+                                    codepoint
+                                };
+                                return Some(Input::Keyboard(modifiers | InputKey::new(key)));
+                            }
                         }
                         _ => {}
                     }

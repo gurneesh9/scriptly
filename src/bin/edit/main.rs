@@ -34,6 +34,7 @@ use edit::framebuffer::{self, IndexedColor};
 use edit::helpers::{KIBI, MEBI, MetricFormatter, Rect, Size};
 use edit::input::{self, kbmod, vk};
 use edit::oklab::oklab_blend;
+use edit::syntax;
 use edit::tui::*;
 use edit::vt::{self, Token};
 use edit::{apperr, arena_format, base64, path, sys};
@@ -352,6 +353,13 @@ fn draw(ctx: &mut Context, state: &mut State) {
             state.wants_exit = true;
         } else if key == kbmod::CTRL | vk::G {
             state.wants_goto = true;
+        } else if key == kbmod::CTRL | vk::SLASH {
+            if let Some(doc) = state.documents.active_mut() {
+                let file_type = doc.file_type;
+                if let Some(prefix) = syntax::comment_prefix_for_file_type(file_type) {
+                    doc.buffer.borrow_mut().toggle_line_comments(prefix);
+                }
+            }
         } else if key == kbmod::CTRL | vk::F && state.wants_search.kind != StateSearchKind::Disabled
         {
             state.wants_search.kind = StateSearchKind::Search;

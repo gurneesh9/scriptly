@@ -2438,13 +2438,155 @@ impl TextBuffer {
         self.buffer.read_forward(off)
     }
 
+    /// Toggles single-line comments on all lines in the current selection,
+    /// or on the current line if there is no selection.
+    ///
+    /// If ALL non-empty lines already start with `prefix`, the prefix is
+    /// removed (uncomment). Otherwise the prefix is added (comment).
+    /// The entire operation is recorded as a single undo entry.
+    pub fn toggle_line_comments(&mut self, prefix: &str) {
+        // Determine which lines to process.
+        let (start_y, end_y) = if let Some((beg, end)) = self.selection_range() {
+            // If the selection ends exactly at column 0 of a line, that line
+            // wasn't really selected — exclude it.
+            let last_y = if end.logical_pos.x == 0 && end.logical_pos.y > beg.logical_pos.y {
+                end.logical_pos.y - 1
+            } else {
+                end.logical_pos.y
+            };
+            (beg.logical_pos.y, last_y)
+        } else {
+            let y = self.cursor.logical_pos.y;
+            (y, y)
+        };
+
+        // Find the cursor at the start of the first line.
+        let beg_cursor = self.goto_line_start(self.cursor, start_y);
+
+        // Find the cursor at the start of the line AFTER the last selected line
+        // (so our range covers the full last line including its newline).
+        let end_cursor = {
+            let after = self.cursor_move_to_logical_internal(
+                beg_cursor,
+                Point { x: 0, y: end_y + 1 },
+            );
+            // If we didn't actually move to a new line, we're at the end of file.
+            if after.logical_pos.y > end_y {
+                after
+            } else {
+                // Last line has no trailing newline — use end of buffer.
+                self.cursor_move_to_logical_internal(beg_cursor, Point::MAX)
+            }
+        };
+
+        // Extract the raw bytes of the target range.
+        let mut raw: Vec<u8> = Vec::new();
+        self.buffer.extract_raw(beg_cursor.offset, end_cursor.offset, &mut raw, usize::MAX);
+
+        // Split into lines (keep the line endings).
+        // We collect (line_content_without_newline, newline_bytes).
+        let mut lines: Vec<(Vec<u8>, &'static [u8])> = Vec::new();
+        {
+            let mut i = 0;
+            while i <= raw.len() {
+                // Find the end of this logical line.
+                let mut j = i;
+                while j < raw.len() && raw[j] != b'\n' && raw[j] != b'\r' {
+                    j += 1;
+                }
+                let content = raw[i..j].to_vec();
+                // Consume newline bytes.
+                let newline: &'static [u8] = if j < raw.len() {
+                    if raw[j] == b'\r' && j + 1 < raw.len() && raw[j + 1] == b'\n' {
+                        b"\r\n"
+                    } else {
+                        b"\n"
+                    }
+                } else {
+                    b""
+                };
+                let nl_len = newline.len();
+                lines.push((content, newline));
+                if j >= raw.len() {
+                    break;
+                }
+                i = j + nl_len;
+            }
+        }
+
+        // Determine whether all non-empty lines are already commented.
+        let prefix_bytes = prefix.as_bytes();
+        let prefix_space = {
+            let mut ps = prefix.to_string();
+            ps.push(' ');
+            ps.into_bytes()
+        };
+
+        let all_commented = lines.iter().all(|(content, _)| {
+            let trimmed = content.iter().position(|&b| b != b' ' && b != b'\t')
+                .map(|i| &content[i..])
+                .unwrap_or(&[]);
+            // Empty lines don't count against "all commented".
+            trimmed.is_empty() || trimmed.starts_with(prefix_bytes)
+        });
+
+        // Build the replacement text.
+        let mut new_raw: Vec<u8> = Vec::new();
+        for (content, nl) in &lines {
+            let indent_end = content.iter().position(|&b| b != b' ' && b != b'\t')
+                .unwrap_or(content.len());
+            let trimmed = &content[indent_end..];
+
+            if all_commented {
+                // Remove comment prefix.
+                new_raw.extend_from_slice(&content[..indent_end]);
+                if trimmed.starts_with(prefix_space.as_slice()) {
+                    new_raw.extend_from_slice(&trimmed[prefix_space.len()..]);
+                } else if trimmed.starts_with(prefix_bytes) {
+                    new_raw.extend_from_slice(&trimmed[prefix_bytes.len()..]);
+                } else {
+                    // Empty line or non-commented — keep as-is.
+                    new_raw.extend_from_slice(trimmed);
+                }
+            } else {
+                // Add comment prefix (skip empty lines).
+                new_raw.extend_from_slice(&content[..indent_end]);
+                if !trimmed.is_empty() {
+                    new_raw.extend_from_slice(prefix_bytes);
+                    new_raw.push(b' ');
+                }
+                new_raw.extend_from_slice(trimmed);
+            }
+            new_raw.extend_from_slice(nl);
+        }
+
+        if new_raw == raw {
+            return; // Nothing to do.
+        }
+
+        // Apply as a single atomic edit (single undo entry).
+        self.edit_begin(HistoryType::Other, beg_cursor);
+        self.edit_delete(end_cursor);
+        self.edit_write(&new_raw);
+        self.edit_end();
+
+        self.set_selection(None);
+    }
+
     // Smart indentation helper methods
-    
+
     fn should_use_smart_indent(&self) -> bool {
-        // Enable smart indent for supported languages
         matches!(
             self.current_file_type,
-            FileType::Python | FileType::Rust | FileType::JavaScript | FileType::TypeScript | FileType::HTML | FileType::CSS
+            FileType::Python | FileType::Rust |
+            FileType::JavaScript | FileType::TypeScript |
+            FileType::Go | FileType::Java | FileType::C | FileType::Cpp |
+            FileType::CSharp | FileType::PHP | FileType::Swift |
+            FileType::Scala | FileType::Kotlin | FileType::PowerShell |
+            FileType::HTML | FileType::XML |
+            FileType::CSS | FileType::Less |
+            FileType::YAML | FileType::JSON |
+            FileType::Shell | FileType::Ruby | FileType::Lua
         )
     }
     
